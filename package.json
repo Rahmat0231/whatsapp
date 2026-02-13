@@ -7,8 +7,10 @@
     "@hapi/boom": "^10.0.1",
     "@whiskeysockets/baileys": "^6.5.0",
     "express": "^4.18.2",
+    "mongodb": "^7.1.0",
     "pino": "^7.0.0",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.3"
   },
   "scripts": {
     "start": "node bomber_server.js"
