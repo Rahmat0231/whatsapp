@@ -1,0 +1,16 @@
+{
+  "name": "malxgmn-c2-server",
+  "version": "1.0.0",
+  "description": "WhatsApp Terminal Bomber (Server API)",
+  "main": "bomber_server.js",
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.5.0",
+    "express": "^4.18.2",
+    "pino": "^7.0.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "scripts": {
+    "start": "node bomber_server.js"
+  }
+}
